@@ -44,6 +44,9 @@ for(year in years){
   # label(df1, self = FALSE) <- labs
 }
 
+save.image("ArsenicData.RData")
+load("ArsenicData.RData")
+
 ########### Some data processing ###########
 names(df1)[names(df1) == "wtsa2yr.x"] <- "wtsa2yr"
 
@@ -74,11 +77,89 @@ xtabs(~is.na(urxuas) + lbdheg, data = df1)
 xtabs(~is.na(urxuas) + lbdhem, data = df1)
 xtabs(~lbdhem + lbdheg, data = df1)
 
+########### Demographics ###########
+# P-value format function
+pRound <- function(x){
+  if(x > .01){
+    x <- as.character(round(x, 2))
+  }else{
+    if(x < .0001){
+      x <- as.character("<0.0001")
+    }
+    else{
+      if(x < .001){
+        x <- as.character(round(x, 4))
+      }else{
+        x <- as.character(round(x, 3))
+      }
+    }
+  }
+  return(x)
+}
+
+# Survey data:
+dfDemo <- df1 %>% select(seqn, sdmvpsu, sdmvstra, ridageyr, riagendr, ridreth3, myWt, urxuas, lbdheg) %>% 
+  filter(!is.na(myWt) & !is.na(urxuas) & !is.na(lbdheg))
+nhanesDesign0 <- svydesign(id = ~ sdmvpsu, strata = ~ sdmvstra, weights = ~ myWt, nest = TRUE, 
+                          data = dfDemo)
+
+# Quantiles for total arsenic:
+AsTotalQ <- quantile(dfDemo$urxuas, probs = c(.25, .5, .75))
+dfDemo$AsQ <- ifelse(dfDemo$urxuas < AsTotalQ[1], "Q1",
+                     ifelse(dfDemo$urxuas < AsTotalQ[2], "Q2", 
+                            ifelse(dfDemo$urxuas < AsTotalQ[3], "Q3", "Q4")))
+
+sumStatsFun <- function(var, isNum){
+  if(isNum){
+    tab0 <- dfDemo %>% group_by(AsQ) %>% dplyr::summarize(mean = mean((!!rlang::sym(var))),
+                                                          sd = sd((!!rlang::sym(var))), median = median((!!rlang::sym(var))), 
+                                                          Q1 = quantile((!!rlang::sym(var)), probs = .25), Q3 = quantile((!!rlang::sym(var)), probs = .75))
+    dec <- 4 - ceiling(log10(max(tab0$mean)))
+    # Format nice:
+    tab <- rbind(paste0(format(round(tab0$mean, dec), nsmall = dec, trim = TRUE), " pm ", 
+                        format(round(tab0$sd, dec), nsmall = dec, trim = TRUE)),
+                 paste0(format(round(tab0$median, dec), nsmall = dec, trim = TRUE), " (", 
+                        format(round(tab0$Q1, dec), nsmall = dec, trim = TRUE), ", ",
+                        format(round(tab0$Q3, dec), nsmall = dec, trim = TRUE), ")"))
+    tab <- as.data.frame(tab) 
+    names(tab) <- paste0("Q", 1:4)
+    tab$levels <- c("Mean pm SD", "Median (Q1, Q3)")
+  }else{
+    # Summary stats:
+    form <- as.formula(paste0("~", var, "+", "AsQ"))
+    tab <- as.data.frame(xtabs(form, data = dfDemo)) %>% spread(key = quantVar, value = Freq)
+    pTab <- as.data.frame(prop.table(xtabs(form, data = dfDemo), 1)) %>% spread(key = quantVar, value = Freq)
+    tab <- tab %>% left_join(pTab, by = var, suffix = c("_Freq", "_Prop"))
+    # Format nice:
+    tab$Q1 <- paste0(tab$Q1_Freq, " (", format(round(tab$Q1_Prop * 100, 1), nsmall = 1), "%)")
+    tab$Q2 <- paste0(tab$Q2_Freq, " (", format(round(tab$Q2_Prop * 100, 1), nsmall = 1), "%)")
+    tab$Q3 <- paste0(tab$Q3_Freq, " (", format(round(tab$Q3_Prop * 100, 1), nsmall = 1), "%)")
+    tab$Q4 <- paste0(tab$Q4_Freq, " (", format(round(tab$Q4_Prop * 100, 1), nsmall = 1), "%)")
+    tab <- tab[, !grepl("_", names(tab))]
+    names(tab)[names(tab) == var] <- "levels"
+  }
+  
+  form2 <- as.formula(paste0("log(urxuas)", "~", var))
+  form2b <- as.formula(paste0("log(urxuas)", "~1"))
+  lmRes <- svyglm(form2, nhanesDesign0)
+  lmResb <- svyglm(form2b, nhanesDesign0)
+  anova1 <- anova(lmRes, lmResb)
+  tab$anova <- anova1$p
+  
+  tab$var <- var
+  tab$totN <- nrow(data)
+  return(tab)
+}
+sumStatsFun("riagendr", FALSE)
+sumStatsFun("ridageyr", TRUE)
+sumStatsFun("ridreth3", FALSE)
+
+
 ########### Proportion of measurements at LOD ###########
 df2 <- as.matrix(df1[,names(df1) %in% c("urxuas", "urxuas3", "urxuas5", "urxuab", "urxuac", "urxudma", "urxumma")])
 nonMissingAs <- apply(df2, 2, function(x) sum(!is.na(x)))
 isLLOQ <- apply(apply(df2, 2, function(x) x == min(x, na.rm = TRUE)), 2, function(x) sum(x, na.rm = TRUE))
-write.csv(isLLOQ / nonMissingAs, file = "isLLOQ.csv", row.names = FALSE)
+# write.csv(isLLOQ / nonMissingAs, file = "isLLOQ.csv", row.names = FALSE)
 
 df1$urxuas3Above <- factor(ifelse(df1$urdua3lc == 0, 1, 0))
 df1$urxuas5Above <- factor(ifelse(df1$urdua5lc == 0, 1, 0))
@@ -152,14 +233,14 @@ glmEIgG_MonomethylacrsonicCoef$var <- "Monomethylacrsonic"
 glmEIgG_MonomethylacrsonicCoef2 <- as.data.frame(summary(glmEIgG_Monomethylacrsonic2)$coefficients)
 glmEIgG_MonomethylacrsonicCoef2$var <- "Monomethylacrsonic2"
 
-write.csv(rbind(glmEIgG_TotalCoef, glmEIgG_ArsenousAcidCoef, glmEIgG_ArsenousAcidCoef2, 
-                glmEIgG_ArsenicAcidCoef, glmEIgG_ArsenicAcidCoef2,
-                glmEIgG_ArsenobetaineCoef, glmEIgG_ArsenobetaineCoef2,
-                glmEIgG_ArsenocholineCoef, glmEIgG_ArsenocholineCoef2,
-                glmEIgG_DimethylarsinicCoef, glmEIgG_DimethylarsinicCoef2,
-                glmEIgG_MonomethylacrsonicCoef, glmEIgG_MonomethylacrsonicCoef2), 
-      file = "individualModels.csv",
-      row.names = FALSE)
+# write.csv(rbind(glmEIgG_TotalCoef, glmEIgG_ArsenousAcidCoef, glmEIgG_ArsenousAcidCoef2, 
+#                 glmEIgG_ArsenicAcidCoef, glmEIgG_ArsenicAcidCoef2,
+#                 glmEIgG_ArsenobetaineCoef, glmEIgG_ArsenobetaineCoef2,
+#                 glmEIgG_ArsenocholineCoef, glmEIgG_ArsenocholineCoef2,
+#                 glmEIgG_DimethylarsinicCoef, glmEIgG_DimethylarsinicCoef2,
+#                 glmEIgG_MonomethylacrsonicCoef, glmEIgG_MonomethylacrsonicCoef2), 
+#       file = "individualModels.csv",
+#       row.names = FALSE)
 
 ########### Medians by group ###########
 df3 <- df1 %>% filter(!is.na(urxuas) & !is.na(lbdheg))
@@ -170,7 +251,28 @@ medianAs <- df3 %>% group_by(lbdheg) %>% dplyr::summarize(`Total` = median(urxua
                   `Arsenic acid` = median(urxuas5, na.rm = TRUE), `Arsenobetaine` = median(urxuab, na.rm = TRUE),
                   `Arsenocholine` = median(urxuac, na.rm = TRUE), `Dimethylarsinic acid` = median(urxudma, na.rm = TRUE),
                   `Monomethylacrsonic acid` = median(urxumma, na.rm = TRUE))
-write.csv(medianAs, file = "medianAs.csv")
+medianAs$quant <- "Q2"
+# write.csv(medianAs, file = "medianAs.csv")
+
+q3As <- df3 %>% group_by(lbdheg) %>% dplyr::summarize(`Total` = quantile(urxuas, probs = .75), 
+                                                      `Arsenous acid` = quantile(urxuas3, probs = .75, na.rm = TRUE),
+                            `Arsenic acid` = quantile(urxuas5, probs = .75, na.rm = TRUE), 
+                            `Arsenobetaine` = quantile(urxuab, probs = .75, na.rm = TRUE),
+                            `Arsenocholine` = quantile(urxuac, probs = .75, na.rm = TRUE), 
+                            `Dimethylarsinic acid` = quantile(urxudma, probs = .75, na.rm = TRUE),
+                            `Monomethylacrsonic acid` = quantile(urxumma, probs = .75, na.rm = TRUE))
+q3As$quant <- "Q3"
+
+p90As <- df3 %>% group_by(lbdheg) %>% dplyr::summarize(`Total` = quantile(urxuas, probs = .9), 
+                                                      `Arsenous acid` = quantile(urxuas3, probs = .9, na.rm = TRUE),
+                                                      `Arsenic acid` = quantile(urxuas5, probs = .9, na.rm = TRUE), 
+                                                      `Arsenobetaine` = quantile(urxuab, probs = .9, na.rm = TRUE),
+                                                      `Arsenocholine` = quantile(urxuac, probs = .9, na.rm = TRUE), 
+                                                      `Dimethylarsinic acid` = quantile(urxudma, probs = .9, na.rm = TRUE),
+                                                      `Monomethylacrsonic acid` = quantile(urxumma, probs = .9, na.rm = TRUE))
+p90As$quant <- "90"
+
+write.csv(rbind(medianAs, q3As, p90As), file = "quants.csv", row.names = FALSE)
 
 ########### Quantile values ###########
 quantile(df1$urxuab[df1$urxuabAbove == 1], probs = c(1/4, 1/2, 3/4), na.rm = TRUE)
@@ -185,15 +287,15 @@ predict(glmEIgG_Arsenobetaine, type = "link",
                 urxuab = c(0.84, quantile(df1$urxuab[df1$urxuabAbove == 1], probs = c(1/4, 1/2, 3/4), na.rm = TRUE))))
 
 ########### Some plots ###########
-png(filename = "TotalBP.png", height = 4, width = 5, units = "in", res = 300)
+# png(filename = "TotalBP.png", height = 4, width = 5, units = "in", res = 300)
 ggplot(df1 %>% filter(!is.na(lbdheg)), aes(x = lbdheg, y = log(urxuas))) + geom_boxplot() +
   theme_bw() + labs(x = "HepE IgG", y = "Log(Total)")
-dev.off()
+# dev.off()
 
-png(filename = "ArsenobetaineBP.png", height = 4, width = 5, units = "in", res = 300)
+# png(filename = "ArsenobetaineBP.png", height = 4, width = 5, units = "in", res = 300)
 ggplot(df1 %>% filter(!is.na(lbdheg)), aes(x = lbdheg, y = log(urxuab))) + geom_boxplot() +
   theme_bw() + labs(x = "HepE IgG", y = "Log(Arsenobetaine)")
-dev.off()
+#dev.off()
 
 ########### Variance and correlation analysis ###########
 labs <- data.frame(labs = c("Total Urinary As", "Arsenous acid", "Arsenic acid", "Arsenobetaine", 
@@ -204,9 +306,9 @@ df2Log <- log(df2)
 colnames(df2Log) <- labs$labs
 df2cor <- cor(df2Log, use = "pairwise.complete.obs")
 
-png(filename = "corplot.png", height = 8, width = 8, units = "in", res = 300)
+# png(filename = "corplot.png", height = 8, width = 8, units = "in", res = 300)
 corrplot::corrplot(df2cor, order = "hclust", addCoef.col = "black", diag = FALSE)
-dev.off()
+# dev.off()
 
 # Hemoglobin A1c:
 lmGhb <- lm(log(lbxgh) ~ log(urxuas), data = df1 %>% filter(!is.na(wtsa2yr)))
